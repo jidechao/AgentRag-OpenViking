@@ -12,9 +12,10 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
-from pydantic import BaseModel, Field, ValidationError
+from openviking_sdk.errors import OpenVikingError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
-from .agent import ClaudeAgentRuntime
+from .agent import ClaudeAgentRuntime, OpenVikingMcpInventoryError
 from .application import AgenticRagApplication, CommandUpload
 from .commands import CommandEnvelope
 from .config import Settings
@@ -37,6 +38,17 @@ class ConversationStreamRequest(BaseModel):
     message: str = Field(min_length=1)
     target_uri: str | None = None
 
+    @field_validator("session_id")
+    @classmethod
+    def _session_id_must_be_a_uuid(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        try:
+            uuid.UUID(value)
+        except ValueError:
+            raise ValueError("session_id must be a UUID") from None
+        return value
+
 
 def create_app(
     *,
@@ -57,11 +69,29 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        openapi_document = await application.command_client.get_openapi()
-        report = application.validate_command_surface(openapi_document)
-        for warning in report["warnings"]:
-            logger.warning("OpenViking command surface drift: %s", warning)
-        await application.validate_agent_runtime()
+        # An unreachable OpenViking dependency must not prevent startup:
+        # the health endpoint reports it as 503 instead. Verified material
+        # drift (OpenAPI surface or MCP tool inventory) still fails loudly.
+        try:
+            openapi_document = await application.command_client.get_openapi()
+        except OpenVikingError as error:
+            if error.code != "UNAVAILABLE":
+                raise
+            logger.warning(
+                "OpenViking Server is unreachable at startup; skipping command "
+                "surface validation until it recovers"
+            )
+        else:
+            report = application.validate_command_surface(openapi_document)
+            for warning in report["warnings"]:
+                logger.warning("OpenViking command surface drift: %s", warning)
+        try:
+            await application.validate_agent_runtime()
+        except OpenVikingMcpInventoryError:
+            logger.warning(
+                "OpenViking MCP endpoint is unreachable at startup; skipping "
+                "tool inventory validation until it recovers"
+            )
         await application.initialize_jobs()
         yield
         await application.shutdown_jobs()
@@ -191,15 +221,32 @@ def create_app(
             form = await request.form()
             command = form.get("command")
             request_id = form.get("request_id")
+            uploaded = form.get("file")
             raw_arguments = form.get("arguments_json", "{}")
             try:
                 arguments = json.loads(raw_arguments)
                 if not isinstance(arguments, dict):
                     raise ValueError("arguments_json must contain an object")
             except (TypeError, ValueError, json.JSONDecodeError):
-                arguments = None
+                if uploaded is not None and hasattr(uploaded, "read"):
+                    await uploaded.close()
+                envelope = CommandEnvelope.failure(
+                    command=command if isinstance(command, str) else "",
+                    request_id=request_id if isinstance(request_id, str) and request_id else str(uuid.uuid4()),
+                    code="VALIDATION_ERROR",
+                    message="Command request body does not match the execution contract",
+                    details={
+                        "errors": [
+                            {
+                                "path": "arguments_json",
+                                "code": "invalid_json_object",
+                                "message": "arguments_json must be a JSON object",
+                            }
+                        ]
+                    },
+                )
+                return JSONResponse(status_code=400, content=envelope.as_dict())
 
-            uploaded = form.get("file")
             upload = None
             if uploaded is not None and hasattr(uploaded, "read"):
                 upload = CommandUpload(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 import inspect
 from typing import Any
@@ -75,6 +76,7 @@ class SdkOpenVikingCommandClient:
             timeout=30.0,
         )
         self._sdk_initialized = False
+        self._initialize_lock = asyncio.Lock()
         self._client = client or AsyncHTTPClient(
             url=str(settings.openviking_base_url),
             api_key=(
@@ -87,10 +89,13 @@ class SdkOpenVikingCommandClient:
     async def initialize(self) -> None:
         if self._sdk_initialized:
             return
-        initialize = getattr(self._client, "initialize", None)
-        if initialize is not None:
-            await initialize()
-        self._sdk_initialized = True
+        async with self._initialize_lock:
+            if self._sdk_initialized:
+                return
+            initialize = getattr(self._client, "initialize", None)
+            if initialize is not None:
+                await initialize()
+            self._sdk_initialized = True
 
     async def call(self, method_name: str, arguments: Mapping[str, Any]) -> Any:
         await self.initialize()

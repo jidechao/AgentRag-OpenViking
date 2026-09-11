@@ -2,6 +2,7 @@ import copy
 import json
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import httpx
 
@@ -500,6 +501,89 @@ class CommandSurfaceValidationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(client.openapi_calls, 1)
         self.assertEqual(len(client.calls), 0)
+    async def test_unreachable_openviking_still_starts_and_health_reports_503(self):
+        class UnreachableOpenApiClient:
+            def __init__(self):
+                self.openapi_calls = 0
+
+            async def get_openapi(self):
+                self.openapi_calls += 1
+                raise OpenVikingError(
+                    "OpenViking OpenAPI document is unreachable", code="UNAVAILABLE"
+                )
+
+        class DownHealthAdapter:
+            async def check(self):
+                return DependencyHealth(
+                    status=DependencyStatus.DOWN,
+                    reachable=False,
+                    detail="OpenViking Server is unreachable",
+                )
+
+        with TemporaryDirectory() as directory:
+            settings = Settings.from_env(
+                environ={"SESSION_DATABASE_PATH": str(Path(directory) / "sessions.sqlite3")},
+                env_file=Path("does-not-exist.env"),
+            )
+            application = AgenticRagApplication(
+                settings=settings,
+                health_adapter=DownHealthAdapter(),
+                command_client=UnreachableOpenApiClient(),
+            )
+            app = create_app(application=application)
+            transport = httpx.ASGITransport(app=app)
+            async with app.router.lifespan_context(app):
+                async with httpx.AsyncClient(
+                    transport=transport, base_url="http://testserver"
+                ) as http:
+                    response = await http.get("/health")
+
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(response.json()["status"], "degraded")
+        self.assertEqual(
+            response.json()["dependencies"]["openviking_server"]["status"], "down"
+        )
+
+    async def test_unreachable_openviking_with_healthy_probe_starts_and_serves(self):
+        class UnreachableOpenApiClient:
+            async def get_openapi(self):
+                raise OpenVikingError(
+                    "OpenViking OpenAPI document is unreachable", code="UNAVAILABLE"
+                )
+
+        with TemporaryDirectory() as directory:
+            settings = Settings.from_env(
+                environ={"SESSION_DATABASE_PATH": str(Path(directory) / "sessions.sqlite3")},
+                env_file=Path("does-not-exist.env"),
+            )
+            application = AgenticRagApplication(
+                settings=settings,
+                health_adapter=FakeOpenVikingHealthAdapter(),
+                command_client=UnreachableOpenApiClient(),
+            )
+            app = create_app(application=application)
+            transport = httpx.ASGITransport(app=app)
+            async with app.router.lifespan_context(app):
+                async with httpx.AsyncClient(
+                    transport=transport, base_url="http://testserver"
+                ) as http:
+                    catalog = await http.get("/commands")
+
+        self.assertEqual(catalog.status_code, 200, catalog.text)
+
+    async def test_unexpected_openapi_failure_still_fails_startup_loudly(self):
+        class BrokenOpenApiClient:
+            async def get_openapi(self):
+                raise OpenVikingError(
+                    "OpenViking OpenAPI document has an invalid shape", code="INTERNAL"
+                )
+
+        application = make_application(BrokenOpenApiClient())
+        app = create_app(application=application)
+
+        with self.assertRaises(OpenVikingError):
+            async with app.router.lifespan_context(app):
+                pass
 
 
 if __name__ == "__main__":

@@ -296,6 +296,44 @@ class PersistentSessionApplicationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(deleted, {"deleted": True, "session_id": "deleting-session"})
             self.assertEqual(await application.list_sessions(), {"sessions": []})
 
+    async def test_delete_cannot_interleave_with_an_inflight_inspection(self):
+        with TemporaryDirectory() as directory:
+            database_path = Path(directory) / "sessions.sqlite3"
+            application = make_application(PersistentFakeRuntime(), database_path)
+            await collect(application, session_id="race-session", message="第一问")
+
+            store = application.session_store
+            original_summaries = store.list_session_summaries
+            summaries_seen = asyncio.Event()
+            proceed = asyncio.Event()
+            summary_calls = 0
+
+            async def pausing_summaries(project_key):
+                nonlocal summary_calls
+                summary_calls += 1
+                result = await original_summaries(project_key)
+                if summary_calls == 1:
+                    summaries_seen.set()
+                    await proceed.wait()
+                return result
+
+            store.list_session_summaries = pausing_summaries
+
+            get_task = asyncio.create_task(application.get_session("race-session"))
+            await summaries_seen.wait()
+            delete_task = asyncio.create_task(application.delete_session("race-session"))
+            await asyncio.sleep(0.02)
+            self.assertFalse(delete_task.done())
+
+            proceed.set()
+            detail = await get_task
+            deleted = await delete_task
+
+            self.assertTrue(detail["entries"])
+            self.assertEqual(deleted, {"deleted": True, "session_id": "race-session"})
+            with self.assertRaises(SessionNotFoundError):
+                await application.get_session("race-session")
+
     async def test_session_metadata_and_transcripts_are_redacted(self):
         with TemporaryDirectory() as directory:
             database_path = Path(directory) / "sessions.sqlite3"

@@ -17,6 +17,7 @@ from agentic_rag.agent import (
     EXPECTED_OPENVIKING_MCP_TOOLS,
     ClaudeAgentRuntime,
     OpenVikingMcpDriftError,
+    OpenVikingMcpInventoryError,
     validate_mcp_inventory,
 )
 from agentic_rag.config import Settings
@@ -401,6 +402,26 @@ class RuntimeStartupValidationTests(unittest.IsolatedAsyncioTestCase):
                 pass
 
         self.assertIn("OpenViking MCP tool inventory drift", str(raised.exception))
+
+    async def test_unreachable_mcp_endpoint_does_not_block_service_startup(self):
+        class UnreachableMcpInventory:
+            def __init__(self):
+                self.calls = 0
+
+            async def tool_names(self):
+                self.calls += 1
+                raise OpenVikingMcpInventoryError(
+                    "OpenViking native MCP endpoint is unavailable or did not return a tool inventory"
+                )
+
+        inventory = UnreachableMcpInventory()
+        runtime = make_runtime(FakeQuery([]), inventory=inventory)
+        app = await self.with_lifespan(runtime)
+
+        async with app.router.lifespan_context(app):
+            pass
+
+        self.assertEqual(inventory.calls, 1)
 
 
 if __name__ == "__main__":

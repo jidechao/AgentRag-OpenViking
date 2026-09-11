@@ -84,7 +84,7 @@ class StreamingQaEndpointTests(unittest.IsolatedAsyncioTestCase):
         response = await self.request(
             make_application(runtime),
             {
-                "session_id": "session-rest",
+                "session_id": "4f4f9b6e-7f6b-4b6f-9d8b-3d0f2d6f1a01",
                 "message": "知识库里有什么？",
                 "target_uri": "viking://demo",
             },
@@ -105,8 +105,29 @@ class StreamingQaEndpointTests(unittest.IsolatedAsyncioTestCase):
                 ("done", "done"),
             ],
         )
-        self.assertEqual(runtime.calls, [("session-rest", "知识库里有什么？", "viking://demo")])
+        self.assertEqual(
+            runtime.calls,
+            [("4f4f9b6e-7f6b-4b6f-9d8b-3d0f2d6f1a01", "知识库里有什么？", "viking://demo")],
+        )
         self.assertEqual(events[-1][1]["citations"], ["viking://Demo/A"])
+
+    async def test_non_uuid_session_id_returns_structured_sse_validation_error(self):
+        runtime = FakeClaudeRuntime([])
+        response = await self.request(
+            make_application(runtime),
+            {"session_id": "not-a-uuid", "message": "知识库里有什么？"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.headers["content-type"].startswith("text/event-stream"))
+        events = parse_sse(response.text)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0][0], "error")
+        self.assertEqual(events[0][1]["type"], "error")
+        self.assertEqual(events[0][1]["code"], "VALIDATION_ERROR")
+        self.assertEqual(events[0][1]["session_id"], "not-a-uuid")
+        self.assertTrue(events[0][1]["request_id"])
+        self.assertEqual(runtime.calls, [])
 
     async def test_terminal_failure_is_returned_as_a_final_sse_error_event(self):
         runtime = FakeClaudeRuntime(
@@ -129,7 +150,10 @@ class StreamingQaEndpointTests(unittest.IsolatedAsyncioTestCase):
     async def test_invalid_qa_request_returns_the_error_through_sse(self):
         response = await self.request(
             make_application(FakeClaudeRuntime([])),
-            {"session_id": "session-invalid", "message": ""},
+            {
+                "session_id": "9c2d9f0d-3f2a-4f7e-9a11-9d0f6d0d9b02",
+                "message": "",
+            },
         )
 
         self.assertEqual(response.status_code, 200)
@@ -143,7 +167,9 @@ class StreamingQaEndpointTests(unittest.IsolatedAsyncioTestCase):
             events[0][1]["message"],
             "QA request body does not match the streaming contract",
         )
-        self.assertEqual(events[0][1]["session_id"], "session-invalid")
+        self.assertEqual(
+            events[0][1]["session_id"], "9c2d9f0d-3f2a-4f7e-9a11-9d0f6d0d9b02"
+        )
         self.assertTrue(events[0][1]["request_id"])
         self.assertTrue(events[0][1]["timestamp"])
 

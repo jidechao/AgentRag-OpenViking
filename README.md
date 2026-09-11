@@ -42,19 +42,28 @@
 
 - **OpenViking Server 是独立进程**，本服务只连接它、不管理它，所以要先启动它（见快速开始第 2 步）。
 - 问答走 OpenViking 原生 `/mcp` 端点（MCP = Model Context Protocol，模型调用外部工具的标准协议），不额外自建 MCP server。
-- Claude Agent SDK 负责模型循环、工具调用、会话存储接入和 runtime 子进程生命周期——本项目不是简单包一层 DeepSeek API。
+- Claude Agent SDK 负责模型循环、工具调用、会话存储接入和 runtime 生命周期：Python Agent SDK 会监管 Claude runtime 子进程（stdio 通信）——本项目不是简单包一层 DeepSeek API。
 - REST 默认只监听 `127.0.0.1`（本机）；密钥只从本地 `.env` 读取，调用方无法传入供应商密钥。
 
 ## 快速开始
 
 ### 准备
 
-- Windows + 本仓库（自带配好依赖的 `.venv` 虚拟环境，Python 3.11）
+- Windows + Python 3.11
 - 一个 [DeepSeek API Key](https://platform.deepseek.com)（真实问答必需）
 - [Ollama](https://ollama.com) 已安装，并拉取检索用的 embedding 模型：
 
 ```powershell
 ollama pull qwen3-embedding:0.6b
+```
+
+> embedding 模型选择与向量索引配置是外部 OpenViking/Ollama 运行环境的前置条件（通过 `agentic-rag-ov.conf` 交给 OpenViking Server），不属于本应用的管理范围；本应用只连接已经配置好的 OpenViking Server，不托管这类配置。
+
+克隆仓库后先创建虚拟环境并安装锁定依赖（只需一次）：
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
 ### 第 1 步：配置 `.env`
@@ -91,7 +100,7 @@ cd D:\project\Harness\python-claude-sdk
 .\.venv\Scripts\python.exe -m agentic_rag repl
 ```
 
-所有命令都必须使用仓库虚拟环境中的 Python（如上所示）。REPL 支持 `/new`（新会话）、`/session <session-id>`（切换会话）、`/current`（查看当前会话）、`/clear`（清屏）、`/exit`（退出）。
+所有命令都必须使用仓库虚拟环境中的 Python（如上所示，即 `python -m agentic_rag serve` 与 `python -m agentic_rag repl`，Windows 上通过 `.\.venv\Scripts\python.exe` 调用）。REPL 支持 `/new`（新会话）、`/session <session-id>`（切换会话）、`/current`（查看当前会话）、`/clear`（清屏）、`/exit`（退出）。
 
 ### 第 4 步：上传示例文档
 
@@ -141,6 +150,14 @@ REPL 方式：启动后直接输入问题即可。
 3. **应该拒答**：`AGENTIC-RAG-DEMO-NO-SUCH-CLAIM-9931 是什么？` → 应明确拒绝，而不是编造
 
 有依据的回答必须给出 OpenViking `viking://` 引用；知识库不支持的问题应明确拒绝，不得为"缺失本身"伪造引用。
+
+样例数据默认保留在 Demo 命名空间 `viking://resources/agentic-rag-demo` 中，便于随时复验。需要清理时执行下面的命令（删除后应轮询返回的 job 确认 OpenViking 删除完成）：
+
+```bash
+curl -sS -X POST http://127.0.0.1:8000/commands/execute \
+  -H 'Content-Type: application/json' \
+  --data '{"command":"rm","arguments":{"uri":"viking://resources/agentic-rag-demo","recursive":true}}'
+```
 
 ## REST API 速览
 
@@ -196,19 +213,125 @@ SSE 的 `event:` 名称与 payload `type` 总是相同。所有事件都包含�
 | `DEEPSEEK_MODEL` | 否 | `deepseek-flash` | DeepSeek 模型名 |
 | `SESSION_DATABASE_PATH` | 否 | `data/sessions.sqlite3` | 会话与任务 SQLite 路径 |
 
-## 常用命令精选
+## 命令目录
 
-`POST /commands/execute` 支持一百多条命令，完整目录见 [docs/commands.md](docs/commands.md)。新手最常用的：
+`POST /commands/execute` 桥接 OpenViking 的全部 CLI Semantic Command（下表由 `agentic_rag/command_manifest.json` 生成，与 `GET /commands` 返回的目录一致；启动时还会对照运行中的 OpenViking OpenAPI 校验，实质漂移会拒绝启动）。长任务语义详见 [docs/commands.md](docs/commands.md)。
 
-| 命令 | 用途 | 风险 |
-|---|---|---|
-| `health` / `status` | 检查 OpenViking 状态 | 只读 |
-| `mkdir` | 创建知识库目录 | 变更 |
-| `add-resource` | 上传文档 | 变更 |
-| `ls` / `tree` | 浏览知识库内容 | 只读 |
-| `read` | 读取一份文档 | 只读 |
-| `search` | 语义检索 | 只读 |
-| `rm` | 删除资源 | **破坏性** |
+| # | 命令 | Transport | 执行模式 | 文件输入 | 风险 | 说明 |
+|---:|---|---|---|---|---|---|
+| 1 | `health` | sdk | 同步 | 无 | 只读 | Run a quick server reachability check. |
+| 2 | `status` | sdk | 同步 | 无 | 只读 | Show OpenViking server readiness and component status. |
+| 3 | `find` | sdk | 同步 | 无 | 只读 | Retrieve relevant OpenViking context semantically. |
+| 4 | `read` | sdk | 同步 | 无 | 只读 | Read exact Level 2 file content from a Viking URI. |
+| 5 | `write` | sdk | OpenViking 原生异步 | 无 | 变更 | Update text content in an existing resource. |
+| 6 | `add-resource` | sdk | OpenViking 原生异步 | 可选上传 | 变更 | Import a local file, folder, URL, repository, or whole website (sitemap/RSS) into OpenViking. |
+| 7 | `add-skill` | sdk | OpenViking 原生异步 | 可选上传 | 变更 | Import a skill directory, SKILL.md file, or raw skill content. |
+| 8 | `add-memory` | rest_fallback | OpenViking 原生异步 | 无 | 变更 | Add a memory directly from text or JSON messages. |
+| 9 | `set-tags` | sdk | OpenViking 原生异步 | 无 | 变更 | Update explicit retrieval tags for a file or directory. |
+| 10 | `ls` | sdk | 同步 | 无 | 只读 | List resources under a Viking URI. |
+| 11 | `tree` | sdk | 同步 | 无 | 只读 | Show a hierarchical view of resources under a URI. |
+| 12 | `mkdir` | sdk | 同步 | 无 | 变更 | Create a directory in OpenViking. |
+| 13 | `rm` | sdk | OpenViking 原生异步 | 无 | 破坏性 | Remove a resource from OpenViking. |
+| 14 | `cp` | rest_fallback | 同步 | 无 | 变更 | Copy a file or directory without reparsing or regenerating vectors. |
+| 15 | `mv` | sdk | 同步 | 无 | 变更 | Move or rename a resource. |
+| 16 | `stat` | sdk | 同步 | 无 | 只读 | Show metadata for one resource. |
+| 17 | `attrs get` | rest_fallback | 同步 | 无 | 只读 | Get or update logical extended attributes for a resource. |
+| 18 | `attrs set-tags` | sdk | OpenViking 原生异步 | 无 | 变更 | Get or update logical extended attributes for a resource. |
+| 19 | `get` | sdk | 同步 | 输出文件 | 只读 | Download a file resource to a local path. |
+| 20 | `search` | sdk | 同步 | 无 | 只读 | Run experimental context-aware retrieval, optionally scoped to a session. |
+| 21 | `grep` | sdk | 同步 | 无 | 只读 | Search resource content with a text pattern. |
+| 22 | `glob` | sdk | 同步 | 无 | 只读 | Find resources by glob pattern. |
+| 23 | `abstract` | rest_fallback | 同步 | 无 | 只读 | Read Level 0 abstract content for a directory. |
+| 24 | `overview` | sdk | 同步 | 无 | 只读 | Read Level 1 overview content for a directory. |
+| 25 | `wait` | sdk | 本地后台等待 | 无 | 只读 | Wait for queued async processing to complete. |
+| 26 | `reindex` | sdk | OpenViking 原生异步 | 无 | 变更 | Reindex semantic/vector artifacts for a URI. |
+| 27 | `import` | sdk | OpenViking 原生异步 | 必须上传 | 变更 | Import an .ovpack into a target URI. |
+| 28 | `export` | sdk | 本地长任务 | 输出文件 | 只读 | Export context from a URI as an .ovpack file. |
+| 29 | `backup` | sdk | 本地长任务 | 输出文件 | 只读 | Create a restore-only backup .ovpack for public OpenViking scopes. |
+| 30 | `restore` | sdk | OpenViking 原生异步 | 必须上传 | 变更 | Restore a backup .ovpack to its original public scope roots. |
+| 31 | `chat` | rest_fallback | 同步 | 无 | 变更 | Chat with the vikingbot agent. |
+| 32 | `compile` | rest_fallback | OpenViking 原生异步 | 无 | 变更 | Use a required VikingBot Skill to compile OpenViking materials into Wiki pages or a Skill package. |
+| 33 | `skills add` | sdk | OpenViking 原生异步 | 可选上传 | 变更 | Add skills from a source |
+| 34 | `skills list` | sdk | 同步 | 无 | 只读 | List installed agent skills |
+| 35 | `skills find` | sdk | 同步 | 无 | 只读 | Find installed agent skills semantically |
+| 36 | `skills show` | sdk | 同步 | 无 | 只读 | Show one installed skill |
+| 37 | `skills update` | sdk | OpenViking 原生异步 | 可选上传 | 变更 | Update installed skills from their recorded source |
+| 38 | `skills remove` | sdk | 同步 | 无 | 破坏性 | Remove installed skills |
+| 39 | `skills validate` | sdk | 同步 | 可选上传 | 只读 | Validate a local SKILL.md file or skill directory |
+| 40 | `acl get` | sdk | 同步 | 无 | 只读 | Get or update access permissions for a resource.: get |
+| 41 | `acl set` | sdk | 同步 | 无 | 变更 | Get or update access permissions for a resource.: set |
+| 42 | `acl grant` | sdk | 同步 | 无 | 变更 | Get or update access permissions for a resource.: grant |
+| 43 | `acl revoke` | sdk | 同步 | 无 | 变更 | Get or update access permissions for a resource.: revoke |
+| 44 | `acl rm` | sdk | 同步 | 无 | 破坏性 | Get or update access permissions for a resource.: rm |
+| 45 | `task status` | sdk | 同步 | 无 | 只读 | Show status of a specific task |
+| 46 | `task cancel` | sdk | 同步 | 无 | 破坏性 | Cancel a task |
+| 47 | `task list` | sdk | 同步 | 无 | 只读 | List all tracked tasks |
+| 48 | `task watch ls` | sdk | 同步 | 无 | 只读 | List watch tasks (auto-refresh subscriptions) |
+| 49 | `task watch show` | sdk | 同步 | 无 | 只读 | Show details of a single watch task |
+| 50 | `task watch rm` | sdk | 同步 | 无 | 破坏性 | Delete a watch task |
+| 51 | `task watch pause` | rest_fallback | 同步 | 无 | 变更 | Pause a watch task (preserves cadence, stops scheduling) |
+| 52 | `task watch resume` | rest_fallback | 同步 | 无 | 变更 | Resume a paused watch task |
+| 53 | `task watch update` | sdk | 同步 | 无 | 变更 | Update one or more mutable fields of a watch task. At least one flag is required |
+| 54 | `task watch trigger` | sdk | 同步 | 无 | 变更 | Trigger an immediate refresh, bypassing the schedule |
+| 55 | `session new` | sdk | 同步 | 无 | 变更 | Create a new session |
+| 56 | `session list` | sdk | 同步 | 无 | 只读 | List sessions |
+| 57 | `session get` | sdk | 同步 | 无 | 只读 | Get session details |
+| 58 | `session get-session-context` | sdk | 同步 | 无 | 只读 | Get full merged session context |
+| 59 | `session get-session-archive` | sdk | 同步 | 无 | 只读 | Get one completed archive for a session |
+| 60 | `session delete` | sdk | 同步 | 无 | 破坏性 | Delete a session |
+| 61 | `session add-message` | sdk | 同步 | 无 | 变更 | Add one message to a session |
+| 62 | `session add-messages` | sdk | 同步 | 无 | 变更 | Add multiple messages to a session |
+| 63 | `session config set` | sdk | 同步 | 无 | 变更 | Set mutable session configuration |
+| 64 | `session commit` | sdk | OpenViking 原生异步 | 无 | 变更 | Commit a session (archive messages and extract memories) |
+| 65 | `snapshot commit` | sdk | 同步 | 无 | 变更 | Commit the current workspace state as a new snapshot. |
+| 66 | `snapshot restore` | sdk | 同步 | 无 | 破坏性 | Restore a project directory to a past snapshot via a forward commit. |
+| 67 | `snapshot show` | sdk | 同步 | 无 | 只读 | Show a commit's metadata, or a single blob at a path. |
+| 68 | `snapshot log` | sdk | 同步 | 无 | 只读 | Walk commit history for a branch, newest first. |
+| 69 | `snapshot diff` | sdk | 同步 | 无 | 只读 | Compare one file between two snapshots as a unified diff. |
+| 70 | `snapshot ignore-get` | sdk | 同步 | 无 | 只读 | Show the account-level .ovgitignore content. |
+| 71 | `snapshot ignore-set` | sdk | 同步 | 无 | 变更 | Set the account-level .ovgitignore content (overwrites). |
+| 72 | `snapshot ignore-delete` | sdk | 同步 | 无 | 破坏性 | Delete the account-level .ovgitignore file (idempotent). |
+| 73 | `privacy categories` | rest_fallback | 同步 | 无 | 只读 | List privacy config categories |
+| 74 | `privacy list` | rest_fallback | 同步 | 无 | 只读 | List targets by category |
+| 75 | `privacy get` | rest_fallback | 同步 | 无 | 只读 | Get current active config for target |
+| 76 | `privacy upsert` | rest_fallback | 同步 | 无 | 变更 | Upsert privacy config values |
+| 77 | `privacy versions` | rest_fallback | 同步 | 无 | 只读 | List versions for target |
+| 78 | `privacy version` | rest_fallback | 同步 | 无 | 只读 | Get one version by number |
+| 79 | `privacy activate` | rest_fallback | 同步 | 无 | 变更 | Activate a version |
+| 80 | `admin create-account` | sdk | 同步 | 无 | 特权 | Create a new account with its first admin user |
+| 81 | `admin list-accounts` | sdk | 同步 | 无 | 特权 | List all accounts (ROOT only) |
+| 82 | `admin delete-account` | sdk | 同步 | 无 | 特权 | Delete an account and all associated users (ROOT only) |
+| 83 | `admin migrate` | sdk | OpenViking 原生异步 | 无 | 特权 | Migrate legacy agent/session data to user-owned namespaces (ROOT only) |
+| 84 | `admin register-user` | sdk | 同步 | 无 | 特权 | Register a new user in an account |
+| 85 | `admin list-users` | sdk | 同步 | 无 | 特权 | List all users in an account |
+| 86 | `admin create-group` | sdk | 同步 | 无 | 特权 | Create an empty account-scoped group |
+| 87 | `admin list-groups` | sdk | 同步 | 无 | 特权 | List groups in an account |
+| 88 | `admin list-group-members` | sdk | 同步 | 无 | 特权 | List the users in a group |
+| 89 | `admin add-group-member` | sdk | 同步 | 无 | 特权 | Add an existing account user to a group |
+| 90 | `admin remove-group-member` | sdk | 同步 | 无 | 特权 | Remove a user from a group |
+| 91 | `admin delete-group` | sdk | 同步 | 无 | 特权 | Delete an empty group |
+| 92 | `admin remove-user` | sdk | 同步 | 无 | 特权 | Remove a user from an account |
+| 93 | `admin set-role` | sdk | 同步 | 无 | 特权 | Change a user's role (ROOT only) |
+| 94 | `admin regenerate-key` | sdk | 同步 | 无 | 特权 | Regenerate a user's API key (old key immediately invalidated) |
+| 95 | `admin set-account-settings` | rest_fallback | 同步 | 无 | 特权 | Update allowlisted settings for an account |
+| 96 | `observer queue` | rest_fallback | 同步 | 无 | 只读 | Get queue status |
+| 97 | `observer vikingdb` | rest_fallback | 同步 | 无 | 只读 | Get VikingDB status |
+| 98 | `observer models` | rest_fallback | 同步 | 无 | 只读 | Get models status (VLM, Embedding, Rerank) |
+| 99 | `observer retrieval` | rest_fallback | 同步 | 无 | 只读 | Get retrieval quality metrics |
+| 100 | `observer filesystem` | rest_fallback | 同步 | 无 | 只读 | Get filesystem operation metrics |
+| 101 | `observer system` | rest_fallback | 同步 | 无 | 只读 | Get overall system status |
+| 102 | `system wait` | sdk | 本地后台等待 | 无 | 只读 | Wait for queued async processing to complete |
+| 103 | `system status` | sdk | 同步 | 无 | 只读 | Show component status |
+| 104 | `system health` | sdk | 同步 | 无 | 只读 | Quick health check |
+| 105 | `system consistency` | sdk | 同步 | 无 | 只读 | Check filesystem and vector-index consistency for a URI subtree |
+| 106 | `system backend sync-status` | rest_fallback | 同步 | 无 | 只读 | Show multi-write backend sync status for a URI subtree |
+| 107 | `system backend sync-retry` | rest_fallback | 同步 | 无 | 变更 | Retry pending multi-write backend sync work for a URI subtree |
+
+长任务要点：
+
+- 只读命令同步返回统一 envelope；长耗时命令立即返回 job，再用 GET /jobs/{job_id} 轮询。
+- job 状态为 queued / running / succeeded / failed / interrupted。
+- 本地任务重启后会被标记为 interrupted（错误码 JOB_INTERRUPTED）；保留 OpenViking native task ID 的 job 会继续向 Server 对账权威状态。
 
 ## 安全须知
 
@@ -219,9 +342,9 @@ SSE 的 `event:` 名称与 payload `type` 总是相同。所有事件都包含�
 
 ## 版本与依赖说明
 
-最终验证时安装的是 `openviking` 0.4.19（其 Server 的 `/mcp` 端点动态提供 15 个 MCP 工具）与 `openviking-sdk` 0.1.10。OpenViking 在线文档可能落后于安装包；**遇到文档与实际不一致，以本机已安装包和正在运行的 Server/OpenAPI 为准**。
+最终验证时安装的是 OpenViking 0.4.19（其 Server 的 `/mcp` 端点动态提供十五个 MCP 工具）与 `openviking-sdk` 0.1.10。OpenViking 在线文档可能落后于安装包；**遇到文档与实际不一致，以本机已安装包和正在运行的 Server/OpenAPI 为准**。
 
-主要依赖（已装在 `.venv` 中，无需手动安装）：
+主要依赖（版本已锁定在 `requirements.txt`，按快速开始的步骤创建环境后即可运行；下表与锁定清单一致）：
 
 | 依赖 | 验证版本 | 大白话用途 |
 |---|---:|---|
@@ -244,10 +367,19 @@ SQLite 使用 Python 标准库 `sqlite3`，不引入异步数据库驱动。
 ```text
 agentic_rag/   核心代码（Agent Core、REST、REPL、会话、命令桥）
 samples/       三份中文示例文档
-docs/          命令目录、架构决策记录（ADR）、验证文档
+docs/          架构决策记录（ADR）、验证文档、长任务语义
 data/          运行时数据（会话 SQLite），不要删除
 scripts/       命令清单生成脚本
 tests/         测试
+requirements.txt  锁定的依赖清单（新鲜克隆后用它创建环境）
+```
+
+## 运行测试
+
+所有测试必须使用仓库虚拟环境中的 Python：
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -b
 ```
 
 ## 常见问题
@@ -266,7 +398,7 @@ OpenViking 迭代较快，在线资料可能落后。以本机已安装包、实
 
 ## 延伸阅读
 
-- [完整命令目录与长任务语义](docs/commands.md)
+- [长任务与中断语义](docs/commands.md)
 - [REST API 端到端验证记录](docs/postman-rest-api-verification.md)
 - [架构决策记录（ADR）](docs/adr/)
 - [OpenViking 官网](https://openviking.ai) · [Claude Agent SDK 文档](https://docs.anthropic.com/en/docs/claude-code/sdk) · [DeepSeek Anthropic API](https://api-docs.deepseek.com/guides/anthropic_api)

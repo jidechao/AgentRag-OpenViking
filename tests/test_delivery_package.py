@@ -90,12 +90,22 @@ class DeliveryPackageTests(unittest.TestCase):
                 self.assertIn(phrase, readme)
 
     def test_delivery_documents_do_not_embed_secret_shaped_values(self):
-        patterns = (r"sk-[A-Za-z0-9]{16,}", r"OPENVIKING_API_KEY=\S+", r"DEEPSEEK_API_KEY=\S+")
+        # Only ASCII secret-shaped values count; localized placeholders such as
+        # DEEPSEEK_API_KEY=你的密钥 document the setup contract and are allowed.
+        patterns = (
+            r"sk-[A-Za-z0-9]{16,}",
+            r"OPENVIKING_API_KEY=[A-Za-z0-9_.-]{8,}",
+            r"DEEPSEEK_API_KEY=[A-Za-z0-9_.-]{8,}",
+        )
         paths = [
             ROOT / "README.md",
             *sorted((ROOT / "samples").glob("*.md")),
-            ROOT / ".scratch/agentic-rag/evidence/ticket09-real-smoke-report.json",
         ]
+        # .scratch/ is an untracked local workspace; scan the evidence artifact
+        # only when it exists on this machine.
+        evidence = ROOT / ".scratch/agentic-rag/evidence/ticket09-real-smoke-report.json"
+        if evidence.exists():
+            paths.append(evidence)
 
         for path in paths:
             content = path.read_text(encoding="utf-8")

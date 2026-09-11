@@ -336,30 +336,7 @@ class AgenticRagApplication:
             job_result = None if job_status == "failed" else result
             job_error = None
             if job_status == "failed":
-                provider_error = (
-                    result.get("error") if isinstance(result, Mapping) else None
-                )
-                if isinstance(provider_error, Mapping):
-                    code = provider_error.get("code")
-                    message = provider_error.get("message")
-                    job_error = {
-                        "code": f"OPENVIKING_{code}"
-                        if isinstance(code, str) and code
-                        else "OPENVIKING_ERROR",
-                        "message": message
-                        if isinstance(message, str) and message
-                        else "OpenViking command failed",
-                    }
-                    if "details" in provider_error:
-                        job_error["details"] = provider_error["details"]
-                else:
-                    job_error = {
-                        "code": "OPENVIKING_ERROR",
-                        "message": provider_error
-                        if isinstance(provider_error, str) and provider_error
-                        else "OpenViking command failed",
-                        "details": result,
-                    }
+                job_error = _provider_error_payload(result)
             job = await self.job_store.create(
                 job_id=str(uuid.uuid4()),
                 request_id=selected_request_id,
@@ -653,16 +630,17 @@ class AgenticRagApplication:
             "project_key": SESSION_PROJECT_KEY,
             "session_id": session_id,
         }
-        summaries = await self.session_store.list_session_summaries(
-            SESSION_PROJECT_KEY
-        )
-        summary = next(
-            (item for item in summaries if item["session_id"] == session_id), None
-        )
-        if summary is None:
-            raise SessionNotFoundError(session_id)
-        entries = (await self.session_store.load(key)) or []
-        subkeys = await self.session_store.list_subkeys(key)
+        async with self._session_lock(session_id):
+            summaries = await self.session_store.list_session_summaries(
+                SESSION_PROJECT_KEY
+            )
+            summary = next(
+                (item for item in summaries if item["session_id"] == session_id), None
+            )
+            if summary is None:
+                raise SessionNotFoundError(session_id)
+            entries = (await self.session_store.load(key)) or []
+            subkeys = await self.session_store.list_subkeys(key)
         return self._redact_json(
             json_safe(
                 {
@@ -709,14 +687,20 @@ class AgenticRagApplication:
                 return self._redact_json(json_safe(job))
             provider_status = _provider_status(authoritative)
             if provider_status is not None:
-                if isinstance(authoritative, Mapping) and "result" in authoritative:
+                if provider_status == "failed":
+                    result = None
+                    error = _provider_error_payload(authoritative)
+                elif isinstance(authoritative, Mapping) and "result" in authoritative:
                     result = authoritative.get("result")
+                    error = None
                 else:
                     result = authoritative
+                    error = None
                 job = await self.job_store.refresh(
                     job_id,
                     status=provider_status,
                     result=self._redact_json(json_safe(result)),
+                    error=self._redact_json(json_safe(error)),
                     openviking_task_id=task_id,
                 )
         return self._redact_json(json_safe(job))
@@ -790,6 +774,31 @@ def _extract_task_id(result: Any) -> str | None:
     if isinstance(task, Mapping):
         return _extract_task_id(task)
     return None
+
+
+def _provider_error_payload(result: Any) -> dict[str, Any]:
+    provider_error = result.get("error") if isinstance(result, Mapping) else None
+    if isinstance(provider_error, Mapping):
+        code = provider_error.get("code")
+        message = provider_error.get("message")
+        payload: dict[str, Any] = {
+            "code": f"OPENVIKING_{code}"
+            if isinstance(code, str) and code
+            else "OPENVIKING_ERROR",
+            "message": message
+            if isinstance(message, str) and message
+            else "OpenViking command failed",
+        }
+        if "details" in provider_error:
+            payload["details"] = provider_error["details"]
+        return payload
+    return {
+        "code": "OPENVIKING_ERROR",
+        "message": provider_error
+        if isinstance(provider_error, str) and provider_error
+        else "OpenViking command failed",
+        "details": result,
+    }
 
 
 def _provider_status(result: Any) -> str | None:

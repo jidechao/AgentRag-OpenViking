@@ -382,6 +382,93 @@ class FileUploadAndCommandJobTests(unittest.IsolatedAsyncioTestCase):
                 second_client.calls,
                 [("get_task", {"task_id": "native-restart-task"})],
             )
+    async def test_native_task_failure_persists_a_structured_error(self):
+        with temporary_directory() as directory:
+            first = make_application(
+                FakeCommandClient(result={"task_id": "native-fail-task"}), directory
+            )
+            envelope = await first.execute_command(
+                "add-resource", {"path": "D:/existing/path"}, request_id="native-fail"
+            )
+            job_id = envelope.data["job"]["job_id"]
+            self.assertEqual(envelope.data["job"]["status"], "running")
+
+            second = make_application(
+                FakeCommandClient(
+                    result={
+                        "status": "failed",
+                        "error": {"code": "INVALID", "message": "provider rejected"},
+                    }
+                ),
+                directory,
+            )
+            job = await second.get_job(job_id)
+
+            self.assertEqual(job["status"], "failed")
+            self.assertEqual(job["openviking_task_id"], "native-fail-task")
+            self.assertIsNone(job["result"])
+            self.assertEqual(job["error"]["code"], "OPENVIKING_INVALID")
+            self.assertEqual(job["error"]["message"], "provider rejected")
+
+            offline = make_application(
+                FakeCommandClient(
+                    error=OpenVikingError("down", code="UNAVAILABLE")
+                ),
+                directory,
+            )
+            stored = await offline.get_job(job_id)
+            self.assertEqual(stored["status"], "failed")
+            self.assertEqual(stored["error"]["code"], "OPENVIKING_INVALID")
+            self.assertEqual(stored["error"]["message"], "provider rejected")
+
+    async def test_native_task_success_after_failure_clears_the_stored_error(self):
+        with temporary_directory() as directory:
+            first = make_application(
+                FakeCommandClient(result={"task_id": "native-recover-task"}), directory
+            )
+            envelope = await first.execute_command(
+                "add-resource", {"path": "D:/existing/path"}
+            )
+            job_id = envelope.data["job"]["job_id"]
+
+            failing = make_application(
+                FakeCommandClient(
+                    result={
+                        "status": "failed",
+                        "error": {"code": "INTERNAL", "message": "boom"},
+                    }
+                ),
+                directory,
+            )
+            failed = await failing.get_job(job_id)
+            self.assertEqual(failed["status"], "failed")
+
+            succeeding = make_application(
+                FakeCommandClient(
+                    result={
+                        "status": "succeeded",
+                        "result": {"uri": "viking://demo/done"},
+                    }
+                ),
+                directory,
+            )
+            job = await succeeding.get_job(job_id)
+
+            self.assertEqual(job["status"], "succeeded")
+            self.assertEqual(job["openviking_task_id"], "native-recover-task")
+            self.assertEqual(job["result"], {"uri": "viking://demo/done"})
+            self.assertIsNone(job["error"])
+
+            offline = make_application(
+                FakeCommandClient(
+                    error=OpenVikingError("down", code="UNAVAILABLE")
+                ),
+                directory,
+            )
+            stored = await offline.get_job(job_id)
+            self.assertEqual(stored["status"], "succeeded")
+            self.assertEqual(stored["result"], {"uri": "viking://demo/done"})
+            self.assertIsNone(stored["error"])
 
 
 class FileUploadAndJobEndpointTests(unittest.IsolatedAsyncioTestCase):
@@ -464,6 +551,55 @@ class FileUploadAndJobEndpointTests(unittest.IsolatedAsyncioTestCase):
                     status_envelope["data"]["openviking_task_id"],
                     "rest-upload-task",
                 )
+    async def test_multipart_malformed_arguments_json_returns_validation_error_without_executing(self):
+        client = FakeCommandClient()
+        with temporary_directory() as directory:
+            application = make_application(client, directory)
+            transport = httpx.ASGITransport(app=create_app(application=application))
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://testserver"
+            ) as http:
+                for raw in ("not-json", '["not", "an", "object"]'):
+                    with self.subTest(arguments_json=raw):
+                        response = await http.post(
+                            "/commands/execute",
+                            data={
+                                "command": "add-skill",
+                                "arguments_json": raw,
+                                "request_id": "bad-arguments",
+                            },
+                            files={"file": ("skill.md", b"# Skill\n", "text/markdown")},
+                        )
+
+                        self.assertEqual(response.status_code, 400, response.text)
+                        envelope = response.json()
+                        self.assertFalse(envelope["ok"])
+                        self.assertIsNone(envelope["data"])
+                        self.assertEqual(envelope["command"], "add-skill")
+                        self.assertEqual(envelope["request_id"], "bad-arguments")
+                        self.assertEqual(envelope["error"]["code"], "VALIDATION_ERROR")
+            self.assertEqual(client.calls, [])
+
+    async def test_multipart_malformed_arguments_json_fails_without_required_arguments(self):
+        client = FakeCommandClient()
+        with temporary_directory() as directory:
+            application = make_application(client, directory)
+            transport = httpx.ASGITransport(app=create_app(application=application))
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://testserver"
+            ) as http:
+                response = await http.post(
+                    "/commands/execute",
+                    data={"command": "status", "arguments_json": "{oops"},
+                    files={"file": ("notes.md", b"# Notes\n", "text/markdown")},
+                )
+
+                self.assertEqual(response.status_code, 400, response.text)
+                envelope = response.json()
+                self.assertFalse(envelope["ok"])
+                self.assertEqual(envelope["command"], "status")
+                self.assertEqual(envelope["error"]["code"], "VALIDATION_ERROR")
+            self.assertEqual(client.calls, [])
 
 
 if __name__ == "__main__":

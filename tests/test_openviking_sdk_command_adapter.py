@@ -80,6 +80,26 @@ class SdkOpenVikingCommandClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(sdk_client.initialize_count, 1)
 
+    async def test_concurrent_calls_initialize_the_sdk_only_once(self):
+        class SlowInitializeSdkClient(FakeSdkClient):
+            async def initialize(self):
+                self.initialize_count += 1
+                await asyncio.sleep(0.05)
+                self.calls.append({"__initialize__": True})
+
+        sdk_client = SlowInitializeSdkClient()
+        adapter = SdkOpenVikingCommandClient(
+            settings=make_settings(),
+            client=sdk_client,
+        )
+
+        results = await asyncio.gather(
+            *(adapter.call("sync_status", {}) for _ in range(8))
+        )
+
+        self.assertEqual(results, [{"sync": True}] * 8)
+        self.assertEqual(sdk_client.initialize_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

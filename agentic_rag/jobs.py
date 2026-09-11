@@ -90,6 +90,7 @@ class SqliteJobStore:
         *,
         status: str,
         result: Any,
+        error: Any = None,
         openviking_task_id: str | None,
     ) -> dict[str, Any]:
         await self._ready()
@@ -98,6 +99,7 @@ class SqliteJobStore:
             job_id,
             status,
             result,
+            error,
             openviking_task_id,
         )
         return await self.get(job_id)
@@ -107,18 +109,21 @@ class SqliteJobStore:
         job_id: str,
         status: str,
         result: Any,
+        error: Any,
         openviking_task_id: str | None,
     ) -> None:
         with closing(self._connect()) as connection:
             connection.execute(
                 """
                 UPDATE command_jobs
-                SET status = ?, result_json = ?, openviking_task_id = ?, updated_at = ?
+                SET status = ?, result_json = ?, error_json = ?,
+                    openviking_task_id = ?, updated_at = ?
                 WHERE job_id = ?
                 """,
                 (
                     status,
                     _dump(result),
+                    _dump(error),
                     openviking_task_id,
                     _timestamp(),
                     job_id,
