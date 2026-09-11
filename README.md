@@ -28,24 +28,7 @@
 
 ## 它是怎么工作的
 
-```text
-                     用户
-            ┌────────────┴────────────┐
-            ▼                         ▼
-       REPL 终端                  REST API
-            └────────────┬────────────┘
-                         ▼
-                Python Agent Core
-                （同一个核心逻辑）
-                   │           │
-                   ▼           ▼
-          Claude Agent SDK   OpenViking 命令桥
-          （模型循环、工具）  （SDK 优先 + REST 兜底）
-                   │           │
-                   ▼           ▼
-          DeepSeek 大模型    OpenViking Server
-          （生成答案）       （存储与检索知识库）
-```
+![架构与数据流](images/flow.png)
 
 三个外部角色，用图书馆打比方：
 
