@@ -64,6 +64,7 @@ ollama pull qwen3-embedding:0.6b
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip install "openviking[bot]==0.4.19"
 ```
 
 ### 第 1 步：配置 `.env`
@@ -81,14 +82,52 @@ DEEPSEEK_API_KEY=你的密钥
 ```powershell
 cd D:\project\Harness\python-claude-sdk
 
+# agentic-rag-ov.conf 通过环境变量引用 .env 中的 DeepSeek 配置
+Get-Content .env | ForEach-Object {
+  if ($_ -match '^\s*([^#][^=]+?)\s*=\s*(.*)$') {
+    Set-Item -Path "Env:$($Matches[1])" -Value $Matches[2]
+  }
+}
+
 .\.venv\Scripts\openviking-server.exe `
   --config=D:\project\Harness\python-claude-sdk\agentic-rag-ov.conf `
   --host=127.0.0.1 `
   --port=1933 `
-  --workers=1
+  --workers=1 `
+  --with-bot
 ```
 
 看到 `OpenViking HTTP Server is running on 127.0.0.1:1933` 就成功了。这个终端要保持开着。
+
+### 可选：启动 OpenViking Web Studio
+
+OpenViking Server 自带打包版 Web Studio。按第 2 步启动 Server 后，直接访问：
+
+```text
+http://127.0.0.1:1933/studio/
+```
+如果需要运行前端开发版（端口 3000），先另开一个终端获取并安装 Web Studio 依赖（只需一次）：
+
+```powershell
+git clone --depth 1 https://github.com/volcengine/OpenViking.git D:\project\Harness\OpenViking
+cd D:\project\Harness\OpenViking\web-studio
+npm install
+```
+
+然后启动 Vite 开发服务器：
+
+```powershell
+$env:VITE_OV_BASE_URL = "http://127.0.0.1:1933"
+.\node_modules\.bin\vite.cmd dev --host 127.0.0.1 --port 3000 --strictPort
+```
+
+浏览器访问：
+
+```text
+http://127.0.0.1:3000/home
+```
+
+`--with-bot` 是会话页的运行契约；没有它时，资源、检索和任务页面仍可用，但 `/bot/v1/*` 与真实聊天能力不可用。
 
 ### 第 3 步：启动本服务（再开一个终端）
 
